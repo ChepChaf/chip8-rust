@@ -1,3 +1,10 @@
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+
+use rand::Rng;
+
 pub struct CPU {
     ram: [u8; 0xFFF],
     program_counter: u16,
@@ -6,6 +13,11 @@ pub struct CPU {
     v: [u8; 16],
     i: u16,
     display: [u8; 64 * 32],
+    dt: u8,
+    last_timer_start: Instant,
+    input_reg: usize,
+    keyboard: [bool; 16],
+    pub waiting_input: bool,
     pub new_draw: bool, // To tell our Renderer that there is a new frame
 }
 
@@ -20,8 +32,35 @@ impl CPU {
             new_draw: true,
             stack: [0; 16],
             stack_pointer: 0,
+            dt: 0,
+            last_timer_start: Instant::now(),
+            waiting_input: false,
+            input_reg: 0,
+            keyboard: [false; 16],
         }
     }
+    pub fn input(&mut self, input: u8) {
+        // TODO: move to keyboard struct
+        if input >= 0x10 {
+            return;
+        }
+
+        if self.waiting_input {
+            self.waiting_input = false;
+            self.v[self.input_reg] = input;
+            self.step_counter();
+        }
+
+        self.keyboard[input as usize] = true;
+    }
+    pub fn clear_input(&mut self, input: u8) {
+        if input >= 0x10 {
+            return;
+        }
+
+        self.keyboard[self.input_reg] = false;
+    }
+
     fn clear_display(&mut self) {
         self.display = [0; 64 * 32];
         self.new_draw = true;
@@ -135,6 +174,8 @@ impl CPU {
 
         self.stack = [0; 16];
         self.stack_pointer = 0;
+        self.last_timer_start = Instant::now();
+        self.keyboard = [false; 16];
     }
     pub fn load_rom(&mut self, rom: Vec<u8>) {
         self.reset();
@@ -158,10 +199,23 @@ impl CPU {
     fn step_counter(&mut self) {
         self.program_counter = self.program_counter + 2;
     }
-    fn handle8000(&mut self, operation: u16) {
+    fn update_timer(&mut self) {
+        if self.dt > 0 {
+            println!("DT: {}", self.dt);
+            let duration = self.last_timer_start.elapsed();
+
+            // 60hz
+            if duration.as_millis() >= (1000 / 60) {
+                self.dt = self.dt - 1;
+                self.last_timer_start = Instant::now();
+                println!("DT: {}", self.dt);
+            }
+        }
+    }
+    fn handle_8_ops(&mut self, operation: u16) {
         let sub_operation = operation & 0x000F;
-        let x = (operation & 0x0F00 >> 8) as usize;
-        let y = (operation & 0x00F0 >> 8) as usize;
+        let x = ((operation & 0x0F00) >> 8) as usize;
+        let y = ((operation & 0x00F0) >> 4) as usize;
 
         match sub_operation {
             0 => {
@@ -194,12 +248,11 @@ impl CPU {
             }
             5 => {
                 if self.v[x] > self.v[y] {
-                    self.v[0xF] = 1;
-                    self.v[x] = self.v[x] - self.v[y];
-                } else {
                     self.v[0xF] = 0;
-                    self.v[x] = self.v[y] - self.v[x];
+                } else {
+                    self.v[0xF] = 1;
                 }
+                self.v[x] = (self.v[x] as i16 - self.v[y] as i16) as u8;
                 self.step_counter();
             }
             6 => {
@@ -217,8 +270,110 @@ impl CPU {
                 } else {
                     self.v[0xF] = 0;
                 }
-                self.v[x] = self.v[x] * 2;
+                self.v[x] = (self.v[x] as u16 * 2) as u8;
                 self.step_counter();
+            }
+            _ => println!("Unknown op code: {:#04x}", operation),
+        }
+    }
+    fn handle_f_ops(&mut self, operation: u16) {
+        let sub_operation = operation & 0x00FF;
+        let x = (operation & 0x0F00) >> 8;
+
+        match sub_operation {
+            0x07 => {
+                self.v[x as usize] = self.dt;
+                self.step_counter();
+            }
+            0x15 => {
+                self.dt = self.v[x as usize];
+                self.last_timer_start = Instant::now();
+                self.step_counter();
+            }
+            0x33 => {
+                let address = self.i as usize;
+                let n = self.v[x as usize];
+
+                self.ram[address] = n / 100; // Hundreds digits
+                self.ram[address + 2] = (n % 100) / 10; // Tens digits
+                self.ram[address + 4] = n % 10; // Ones digits
+
+                self.step_counter();
+            }
+            0x55 => {
+                for i in 0..(x + 1) {
+                    let index = (self.i + i) as usize;
+                    self.ram[index] = self.v[i as usize];
+                }
+                self.step_counter();
+            }
+            0x65 => {
+                let address = self.i as usize;
+
+                for i in 0..(x + 1) {
+                    let index = address + (2 * i) as usize;
+                    self.v[i as usize] = self.ram[index];
+                }
+
+                self.step_counter();
+            }
+            0x1E => {
+                self.i = self.i + x;
+                self.step_counter();
+            }
+            0x0A => {
+                self.input_reg = x as usize;
+                self.waiting_input = true;
+            }
+            _ => println!("Unknown op code: {:#04x}", operation),
+        }
+    }
+    fn handle_d_ops(&mut self, operation: u16) {
+        let n = operation & 0x000F;
+        let x = self.v[((operation & 0x0F00) >> 8) as usize];
+        let y = self.v[((operation & 0x00F0) >> 4) as usize];
+        self.v[0xF] = 0x0;
+
+        for i in 0..n {
+            let mut sprite = self.ram[(self.i + i) as usize];
+            let row = (y as u16 + i) % 32;
+            for j in 0..8 {
+                let b = ((sprite & 0x80) >> 7) * 0xFF;
+                let col = (x as u16 + j) % 64;
+                let index = (col + (row * 64)) as usize;
+
+                let collision = b & self.display[index];
+
+                self.display[index] = b ^ self.display[index];
+                sprite = sprite << 1;
+
+                if collision > 0 {
+                    self.v[0xF] = 1;
+                }
+            }
+        }
+        self.new_draw = true;
+
+        self.step_counter();
+    }
+    fn handle_e_ops(&mut self, operation: u16) {
+        let sub_operation = operation & 0x00FF;
+        let x = (operation & 0x0F00) >> 8;
+        match sub_operation {
+            0xA1 => {
+                if !self.keyboard[self.v[x as usize] as usize] {
+                    self.step_counter();
+                    self.step_counter();
+                }
+            }
+            0x9E => {
+                println!("x: {:#02x}", x);
+                println!("Vx: {:#02x}", self.v[x as usize]);
+                println!("Keyboard: {}", self.keyboard[self.v[x as usize] as usize]);
+                if self.keyboard[self.v[x as usize] as usize] {
+                    self.step_counter();
+                    self.step_counter();
+                }
             }
             _ => println!("Unknown op code: {:#04x}", operation),
         }
@@ -257,7 +412,7 @@ impl CPU {
                 self.program_counter = nnn;
             }
             0x3000 => {
-                let x = operation & 0x0F00 >> 8;
+                let x = (operation & 0x0F00) >> 8;
                 let kk = operation & 0x00FF;
 
                 if self.v[x as usize] == kk as u8 {
@@ -266,7 +421,7 @@ impl CPU {
                 self.step_counter()
             }
             0x4000 => {
-                let x = operation & 0x0F00 >> 8;
+                let x = (operation & 0x0F00) >> 8;
                 let kk = operation & 0x00FF;
 
                 if self.v[x as usize] != kk as u8 {
@@ -275,8 +430,8 @@ impl CPU {
                 self.step_counter()
             }
             0x5000 => {
-                let x = operation & 0x0F00 >> 8;
-                let y = operation & 0x00F0 >> 4;
+                let x = (operation & 0x0F00) >> 8;
+                let y = (operation & 0x00F0) >> 4;
 
                 if self.v[x as usize] == self.v[y as usize] {
                     self.step_counter()
@@ -285,25 +440,24 @@ impl CPU {
             }
             0x6000 => {
                 let x = usize::from((operation & 0x0F00) >> 8);
-                println!("x: {}", x);
                 let kk: u8 = (operation & 0x00FF) as u8;
 
                 self.v[x] = kk;
                 self.step_counter()
             }
             0x7000 => {
-                let x = operation & 0x0F00 >> 8;
+                let x = ((operation & 0x0F00) >> 8) as usize;
                 let kk = operation & 0x00FF;
 
-                self.v[x as usize] = self.v[x as usize] + kk as u8;
+                self.v[x] = ((self.v[x] as u16) + kk) as u8;
                 self.step_counter();
             }
             0x8000 => {
-                self.handle8000(operation);
+                self.handle_8_ops(operation);
             }
             0x9000 => {
-                let x = operation & 0x0F00 >> 8;
-                let y = operation & 0x00F0 >> 4;
+                let x = (operation & 0x0F00) >> 8;
+                let y = (operation & 0x00F0) >> 4;
 
                 if self.v[x as usize] != self.v[y as usize] {
                     self.step_counter();
@@ -315,36 +469,35 @@ impl CPU {
                 self.i = nnn;
                 self.step_counter()
             }
+            0xC000 => {
+                let x = (operation & 0x0F00) >> 8;
+                let kk = (operation & 0x00FF) as u8;
+
+                let mut rng = rand::thread_rng();
+                let r: u8 = rng.gen();
+
+                self.v[x as usize] = r & kk;
+                self.step_counter();
+            }
             0xD000 => {
-                let n = operation & 0x000F;
-                let x = self.v[((operation & 0x0F00) >> 8) as usize];
-                let y = self.v[((operation & 0x00F0) >> 4) as usize];
-
-                for i in 0..n {
-                    let mut sprite = self.ram[(self.i + i) as usize];
-                    let row = (y as u16 + i) % 32;
-                    for j in 0..8 {
-                        let b = (sprite & 0x80 >> 7) * 0xFF;
-                        let col = (x as u16 + j) % 64;
-                        let collision = b & self.display[col as usize];
-
-                        let current_val = self.display[(col + (row * 64)) as usize];
-                        self.display[(col + (row * 64)) as usize] = b ^ current_val;
-                        sprite = sprite >> 1;
-
-                        if collision > 0 {
-                            self.v[0xF] = 1;
-                        }
-                    }
-                }
-                self.new_draw = true;
-
-                self.step_counter()
+                self.handle_d_ops(operation);
+            }
+            0xE000 => {
+                self.handle_e_ops(operation);
+            }
+            0xF000 => {
+                self.handle_f_ops(operation);
             }
             _ => println!("Unknown op code: {:#04x}", operation),
         }
     }
     pub fn step(&mut self) {
+        if self.waiting_input {
+            return;
+        }
+
+        self.update_timer();
+
         let operation: u16 = self.get_operation();
         println!("Current op: {:#04x}", operation);
 

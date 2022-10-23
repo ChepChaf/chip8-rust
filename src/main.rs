@@ -16,6 +16,19 @@ pub fn main() {
 
     'gameloop: loop {
         chip8_cpu.step();
+
+        if display.new_input {
+            chip8_cpu.input(display.input_key);
+
+            // TODO: Encapsulate this
+            display.new_input = false;
+            display.input_key = 0x10;
+        }
+
+        if display.stop_input {
+            chip8_cpu.clear_input(display.stop_input_key);
+        }
+
         if chip8_cpu.new_draw {
             display.set_draw(chip8_cpu.display());
             chip8_cpu.new_draw = false;

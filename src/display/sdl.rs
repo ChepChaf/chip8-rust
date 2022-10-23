@@ -14,6 +14,10 @@ pub struct Display {
     width: u32,
     heigh: u32,
     exit: bool,
+    pub new_input: bool,
+    pub input_key: u8,
+    pub stop_input: bool,
+    pub stop_input_key: u8,
 }
 
 impl Display {
@@ -37,10 +41,35 @@ impl Display {
             width,
             heigh,
             exit: false,
+            new_input: false,
+            input_key: 0x10,
+            stop_input: false,
+            stop_input_key: 0x10,
         }
     }
     pub fn should_close(&self) -> bool {
         return self.exit;
+    }
+    fn keycode_to_hex(code: sdl2::keyboard::Keycode) -> u8 {
+        match code {
+            Keycode::Num0 => 0x0,
+            Keycode::Num1 => 0x1,
+            Keycode::Num2 => 0x2,
+            Keycode::Num3 => 0x3,
+            Keycode::Num4 => 0x4,
+            Keycode::Num5 => 0x5,
+            Keycode::Num6 => 0x6,
+            Keycode::Num7 => 0x7,
+            Keycode::Num8 => 0x8,
+            Keycode::Num9 => 0x9,
+            Keycode::A => 0xA,
+            Keycode::B => 0xB,
+            Keycode::C => 0xC,
+            Keycode::D => 0xD,
+            Keycode::E => 0xE,
+            Keycode::F => 0xF,
+            _ => 0x10,
+        }
     }
     fn bw_to_rgb(&self, frame: &[u8; 64 * 32]) -> [u8; 64 * 32 * 3] {
         let mut new: [u8; 64 * 32 * 3] = [0; 64 * 32 * 3];
@@ -93,6 +122,18 @@ impl Display {
                     ..
                 } => {
                     self.exit = true;
+                }
+                Event::KeyDown {
+                    keycode: Some(key), ..
+                } => {
+                    self.new_input = true;
+                    self.input_key = Display::keycode_to_hex(key);
+                }
+                Event::KeyUp {
+                    keycode: Some(key), ..
+                } => {
+                    self.stop_input = true;
+                    self.stop_input_key = Display::keycode_to_hex(key);
                 }
                 _ => {}
             }
